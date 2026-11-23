@@ -61,6 +61,13 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
 #if os(iOS)
     var interfaceOrientationObserver: NSObjectProtocol?
+
+    /// The camera's rotation for its frames to show level as the app's UI shows them (iOS 17+): from the device, the
+    /// screen and the interface together, as the system's Camera has it, where the interface orientation alone is off
+    /// (a device whose screen turns in its own right, as a foldable unfolded, the interface still portrait). An
+    /// `AVCaptureDevice.RotationCoordinator`, typed `Any` for the iOS versions before it.
+    var rotationCoordinator: Any?
+    var rotationObservation: NSKeyValueObservation?
 #endif
 
     /// Observer for the notification that the app is about to terminate.
@@ -564,8 +571,13 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         captureSession!.commitConfiguration()
 
 #if os(iOS)
-        // Set up observer to update video orientation when interface orientation changes
-        setupInterfaceOrientationObserver()
+        if #available(iOS 17.0, *) {
+            // The rotation coordinator's angle, kept as it changes, rather than the interface orientation's.
+            setupRotationCoordinator()
+        } else {
+            // Set up observer to update video orientation when interface orientation changes
+            setupInterfaceOrientationObserver()
+        }
 #endif
 
         let session = captureSession!
@@ -807,6 +819,39 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     }
 
 #if os(iOS)
+    /// Rotates the frames as the rotation coordinator has them for a preview, now and as it changes: for the layer of the
+    /// app's window, the screen the frames are shown on.
+    @available(iOS 17.0, *)
+    private func setupRotationCoordinator() {
+        guard let device = device else { return }
+        let layer = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first?.layer
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: layer)
+        rotationCoordinator = coordinator
+        applyVideoRotationAngle(coordinator.videoRotationAngleForHorizonLevelPreview)
+        rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self] coordinator, _ in
+            let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+            DispatchQueue.main.async { self?.applyVideoRotationAngle(angle) }
+        }
+    }
+
+    @available(iOS 17.0, *)
+    private func applyVideoRotationAngle(_ angle: CGFloat) {
+        guard let videoOutput = captureSession?.outputs.compactMap({ $0 as? AVCaptureVideoDataOutput }).first else {
+            return
+        }
+        for connection in videoOutput.connections where connection.isVideoRotationAngleSupported(angle) {
+            connection.videoRotationAngle = angle
+        }
+    }
+
+    private func removeRotationCoordinator() {
+        rotationObservation?.invalidate()
+        rotationObservation = nil
+        rotationCoordinator = nil
+    }
+
     /// Set up observer for interface orientation changes
     private func setupInterfaceOrientationObserver() {
         if #available(iOS 13.0, *) {
@@ -972,6 +1017,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     private func releaseCamera() {
 #if os(iOS)
         removeInterfaceOrientationObserver()
+        removeRotationCoordinator()
 #endif
 
         if let captureSession = captureSession {
