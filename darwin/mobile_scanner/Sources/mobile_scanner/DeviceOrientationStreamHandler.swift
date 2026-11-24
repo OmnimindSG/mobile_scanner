@@ -16,6 +16,19 @@ class DeviceOrientationStreamHandler: NSObject, FlutterStreamHandler {
     private var lastSentOrientation: UIInterfaceOrientation?
     private var lastSentDeviceOrientation: UIDeviceOrientation?
 
+    /// The orientation of the frames as the scanner rotates them (iOS 17+, a rotation coordinator's), in place of the
+    /// interface's while it's set: what the preview's size is flipped by, which must match the frames' shape.
+    private var frameOrientation: String?
+    private var lastSentFrameOrientation: String?
+
+    /// Sends [orientation] from now on in place of the interface's; nil, back to the interface's.
+    func setFrameOrientation(_ orientation: String?) {
+        frameOrientation = orientation
+        lastSentFrameOrientation = nil
+        lastSentOrientation = nil
+        sendCurrentOrientation()
+    }
+
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         self.eventSink = events
 
@@ -47,6 +60,13 @@ class DeviceOrientationStreamHandler: NSObject, FlutterStreamHandler {
 
     private func sendCurrentOrientation() {
         guard let sink = eventSink else { return }
+
+        if let frameOrientation = frameOrientation {
+            if lastSentFrameOrientation == frameOrientation { return }
+            lastSentFrameOrientation = frameOrientation
+            sink(frameOrientation)
+            return
+        }
 
         // Use interface orientation instead of device orientation
         // This respects Flutter's setPreferredOrientations

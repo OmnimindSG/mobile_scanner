@@ -68,6 +68,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// `AVCaptureDevice.RotationCoordinator`, typed `Any` for the iOS versions before it.
     var rotationCoordinator: Any?
     var rotationObservation: NSKeyValueObservation?
+    /// Told the frames' orientation as the rotation coordinator rotates them, for the preview's size to match them.
+    var orientationStreamHandler: DeviceOrientationStreamHandler?
 #endif
 
     /// Observer for the notification that the app is about to terminate.
@@ -115,7 +117,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 #if os(iOS)
         let orientationEvent = FlutterEventChannel(name:
                                             "dev.steenbakker.mobile_scanner/scanner/deviceOrientation", binaryMessenger: messenger)
-        orientationEvent.setStreamHandler(DeviceOrientationStreamHandler())
+        let orientationStreamHandler = DeviceOrientationStreamHandler()
+        instance.orientationStreamHandler = orientationStreamHandler
+        orientationEvent.setStreamHandler(orientationStreamHandler)
 #endif
     }
     
@@ -621,13 +625,18 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         case .front: 0
                         @unknown default: nil
                     }
-                    
+#if os(iOS)
+                    let initialDeviceOrientation = self.initialFrameOrientation(deviceVideoOrientation)
+#else
+                    let initialDeviceOrientation = deviceVideoOrientation.toOrientationString
+#endif
+
                     answer = [
                         "textureId": self.textureId,
                         "size": size,
                         "currentTorchState": device.hasTorch ? device.torchMode.rawValue : -1,
                         "cameraDirection": cameraDirection,
-                        "initialDeviceOrientation": deviceVideoOrientation.toOrientationString
+                        "initialDeviceOrientation": initialDeviceOrientation
                     ]
                 } else {
                     answer = [
@@ -844,12 +853,37 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         for connection in videoOutput.connections where connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
         }
+        orientationStreamHandler?.setFrameOrientation(Self.frameOrientation(forRotationAngle: angle))
+    }
+
+    /// The orientation the Dart side takes the frames for, by their rotation: upright (taller than wide) at 90° or
+    /// 270°, the sensor's own landscape at 0° or 180°.
+    static func frameOrientation(forRotationAngle angle: CGFloat) -> String {
+        switch Int(angle.rounded()) % 360 {
+        case 90:
+            return "PORTRAIT_UP"
+        case 270:
+            return "PORTRAIT_DOWN"
+        case 180:
+            return "LANDSCAPE_RIGHT"
+        default:
+            return "LANDSCAPE_LEFT"
+        }
+    }
+
+    /// The frames' orientation at the start: the rotation coordinator's where there's one, else [videoOrientation].
+    private func initialFrameOrientation(_ videoOrientation: AVCaptureVideoOrientation) -> String {
+        if #available(iOS 17.0, *), let coordinator = rotationCoordinator as? AVCaptureDevice.RotationCoordinator {
+            return Self.frameOrientation(forRotationAngle: coordinator.videoRotationAngleForHorizonLevelPreview)
+        }
+        return videoOrientation.toOrientationString
     }
 
     private func removeRotationCoordinator() {
         rotationObservation?.invalidate()
         rotationObservation = nil
         rotationCoordinator = nil
+        orientationStreamHandler?.setFrameOrientation(nil)
     }
 
     /// Set up observer for interface orientation changes
